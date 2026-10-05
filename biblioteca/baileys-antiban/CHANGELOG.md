@@ -1,0 +1,687 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [4.10.0] - 2026-06-11
+
+### Added
+- `ReputationVoucher` — dedicated sacrificial warmup accounts that create real bidirectional conversation history for new numbers before they contact customers. Max 5 vouches/week per vouching account, 3-strike suspension system, warmup credit calculation (0-3 days).
+
+## [4.9.0] - 2026-06-11
+
+### Added
+- `TopologyThrottler` — graph-expansion enforcement replacing timing mimicry. Limits new contacts/hour/day, enforces minimum reply ratio, detects source group hotspots (mass-DM patterns).
+- `ContactRiskScore` — classifies each send target (first contact, replied before, mutual groups) with a 0-100 risk score and abort/delay/send recommendation.
+
+## [4.8.0] - 2026-06-11
+
+### Added
+- `MessageTypeRegistry` — register message types upfront with priority (critical/normal/bulk), provenance requirements, and per-pool rate limits. Tracks read/reply/block rates per type, emits warnings only (never autopilot throttles). Critical types require provenance (e.g. `user_action_id`).
+- `exportState()` / `importState()` on `AntiBan` class — unified single-call state serialization for Redis failover. Covers warmup, health, rate limits, circuit breakers, timelockGuard, message registry, engagement scores, reputation voucher. CRDT-safe (increment-only counters, never overwrites higher values).
+
+### Fixed
+- Warmup day count now persisted with current date — survives process crashes without resetting to day 1
+- `JidCircuitBreaker` state (blocked JIDs, failure counts, openedAt) now exported/imported — no longer forgets blocked recipients on restart
+- `DeafSessionDetector` reconnect no longer races with `InstanceCoordinator` — local rate limiter backfilled from shared pool on reconnect, preventing double-spend of tokens
+
+## [3.8.11] - 2026-05-19
+
+### Security
+- **persist.ts**: Resolve state file path to absolute (`path.resolve()`), reject null bytes. Add strict JSON shape validation (version, savedAt, knownChats types) before trusting loaded state — prevents type confusion from corrupt or tampered files.
+- **proxyRotator.ts**: Replace `(0, eval)('require')` and `(0, eval)('import.meta.url')` with `new Function()` on static literal strings in the ESM code path. Not user-controlled, but removes the indirect eval chain for static analysis and CSP compliance.
+
+### Fixed
+- **rateLimiter.ts**: Added LRU size cap (10,000 entries) to `identicalCount` Map. Time-window eviction alone allowed unbounded growth when sending many unique messages; oldest-by-lastSeen entries are now evicted when the cap is exceeded.
+- **antiban.ts**: Extend `mapLegacyToFlat()` to preserve `autoPauseAt`, `groupMultiplier`, `groupProfiles`, `persist` from flat top-level fields when legacy config detection fires — completing the coverage from 3.8.9.
+
+### Changed (3.8.10)
+- README: Expanded v3 flat config example with all `ResolvedConfig` fields; added correct `deafSession` wrapOptions (4th arg) example; marked nested Configuration section as deprecated.
+- Tests: 4 new v3 test cases covering `maxIdenticalMessages`/`burstAllowance` forwarding, mixed legacy+flat preservation, `getConfig()`.
+- CHANGELOG: Added missing 3.8.9 entry.
+
+## [3.8.9] - 2026-05-19
+
+### Fixed
+- **`maxIdenticalMessages`, `identicalMessageWindowMs`, `burstAllowance` silently ignored.** These fields were missing from `ResolvedConfig` so passing them in flat config had no effect — the `RateLimiter` used its hardcoded defaults (3/3/3600000). All three are now in `ResolvedConfig`, set via preset defaults, and forwarded to `RateLimiter`. Reported in #8.
+- **Flat top-level fields dropped when legacy config is detected.** If a config object contained any nested key (`health`, `timelock`, `jidCanonicalizer`, `lidResolver`, etc.), `isLegacyConfig()` returned true and `mapLegacyToFlat()` only extracted fields from nested sub-objects — silently dropping flat top-level fields like `warmUpDays`, `day1Limit`, `growthFactor`, `inactivityThresholdHours`, `maxIdenticalMessages`, `burstAllowance`. Mixed configs (flat rate/warmup fields + nested callback objects) now preserve the flat fields correctly. Reported in #8.
+
+### Added
+- **`AntiBan.getConfig()`** — returns a copy of the effective resolved config after preset merging and defaults. Useful for debugging which values are actually in use.
+- **Preset defaults for new fields** — `maxIdenticalMessages`: 3/5/10/20, `identicalMessageWindowMs`: 3600000 (all presets), `burstAllowance`: 3/5/8/15 for conservative/moderate/aggressive/high-volume.
+
+## [3.8.8] - 2026-05-15
+
+### Added
+- **`high-volume` preset** — for established, fully-warmed accounts running enterprise-scale operations. Limits: 40 msg/min, 1500/hr, 8000/day, 400–1800ms delays. Only use on accounts with 6+ months history and no prior bans. Set via `wrapSocket(sock, 'high-volume')` or env var `ANTIBAN_PRESET=high-volume`.
+- **Env-var integration pattern in docs** — full example showing how to drive every antiban parameter from environment variables inside a bot framework (avoids redeploying to tune limits). Based on real-world usage patterns from Zyra (kaikybrofc/zyra).
+
+## [3.8.7] - 2026-05-14
+
+### Added
+- **`baileys-antiban patch` CLI command** — for frameworks that create the Baileys socket internally (OpenClaw `@openclaw/whatsapp`, custom ESM loaders) and don't expose a `socket:ready` hook. Automatically locates the Baileys install, detects CJS vs ESM output format, backs up the original file, and injects a `wrapSocket()` call around `makeWASocket`. Idempotent — safe to re-run after plugin updates. Pairs with a `postinstall` npm script for zero-maintenance re-patching.
+  - Auto-discovers Baileys in `node_modules/@openclaw/whatsapp/node_modules/baileys`, `node_modules/baileys`, `node_modules/@whiskeysockets/baileys`, and parent directories.
+  - `--path <dir>` — explicit Baileys directory override.
+  - `--preset conservative|moderate|aggressive` — antiban profile (default: `conservative`).
+  - `--min-delay` / `--max-delay` — override delay range in ms (default 1500–4000).
+  - `--no-typing` — disable typing indicators.
+  - `--dry-run` — preview without writing files.
+  - `--force` — re-patch even if already patched.
+  - Runtime config via env: `ANTIBAN_PRESET`, `ANTIBAN_MIN_DELAY`, `ANTIBAN_MAX_DELAY`, `ANTIBAN_TYPING`.
+- **`baileys-antiban unpatch` CLI command** — restores a patched file from its `.antiban-backup` or strips the patch block in-place if backup is missing.
+
+## [3.8.6] - 2026-05-14
+
+### Fixed
+- **CJS build for NestJS / CommonJS consumers.** Adds `dist/cjs/` output compiled with `module: CommonJS`, a `{"type":"commonjs"}` package marker injected at build time, and an `exports["require"]` condition so `require('baileys-antiban')` now resolves cleanly. Previously CommonJS callers hit `ERR_PACKAGE_PATH_NOT_EXPORTED` or `ERR_REQUIRE_ESM`.
+- **`messageRecovery` persistence load in ESM context.** `loadPersistence()` previously called `require('fs')` which is not defined in native ESM scope, throwing `ReferenceError` at runtime whenever `persistPath` was configured. Fixed by using static `import { existsSync, readFileSync } from 'node:fs'` at module top level.
+- **`messageRecovery` doc comment.** Placeholder `issues/XXX` issue reference updated to `issues/2491` (deaf-session / silent message loss tracker).
+
+### Changed
+- Removed unused `jest`, `@types/jest`, and `ts-jest` devDependencies (test runner uses `tsx` directly; `vitest` retained as future framework).
+- **Docs: ESM plugin-framework integration.** Added troubleshooting section to README covering `wrapSocket()` as the correct integration point for OpenClaw, custom ESM loaders, and other plugin frameworks that use native ESM. Documents why `Module._load` interception does not work with ESM and how to set up `ev.process` + `ev.on` fallback correctly.
+
+## [3.8.5] - 2026-05-09
+
+### Added
+- **Observability module** (`src/observability.ts`) — Prometheus metrics export and pluggable structured logging.
+  - `exportPrometheusMetrics(stats, labels?)` — exports 27 metrics (3 counters, 24 gauges) in Prometheus text exposition format v0.0.4. Covers health score/risk, warmup progress, rate limiter windows, known chats, reply ratio, contact graph, retry spirals, reconnect throttle. Accepts custom labels (`instance`, `region`, etc.).
+  - `createMetricsHandler(getStats, labels?)` — returns Express/Fastify-compatible `handle(req, res)` + `text()` helpers for a `/metrics` endpoint.
+  - `createPeriodicExporter(getStats, config)` — push-based exporter that calls `onMetrics(text)` on a configurable interval (default 30s). Returns `stop()` handle.
+  - `createConsoleLogger(prefix?)` — structured console logger compatible with winston/pino interface (`debug`, `info`, `warn`, `error` with ISO timestamps and JSON meta).
+  - `AntiBanLogger` interface — plug in any logger: `winston`, `pino`, or the built-in console logger.
+- New exports: `createConsoleLogger`, `exportPrometheusMetrics`, `createMetricsHandler`, `createPeriodicExporter`, `AntiBanLogger`, `PeriodicExporterConfig`, `PeriodicExporterHandle`.
+
+## [3.8.4] - 2026-05-09
+
+### Added
+- **`DeafSessionDetector`** — detects WebSocket sessions that stay open but stop delivering `messages.upsert` / `messages.update` events (Baileys issue #2491). Root cause: `messageMutex` holding ACKs under Redis latency spikes triggers WhatsApp server-side flow control, silently stopping message delivery while keepAlive pings still succeed. The detector runs a 30-second interval, fires `onDeafSession` callback with silence duration info, and optionally calls `sock.end(new Error('deaf-session'))` for auto-reconnect. Configurable `timeoutMs` (default 5 min), `minUptimeMs` warmup guard (default 2 min), `autoReconnect` flag.
+- **`wrapSocket` `deafSession` option** — pass `deafSession: DeafSessionConfig` to `wrapOptions` to enable automatic deaf-session detection on the wrapped socket. Activity signals are wired to all `messages.upsert` and `messages.update` events; cleanup is tied to `connection.update` close events.
+- New exports: `DeafSessionDetector`, `DeafSessionConfig`, `DeafSessionInfo`.
+
+## [3.8.3] - 2026-05-09
+
+### Fixed
+- **Compiled dist now ships with rc10 fixes.** v3.8.2 published stale dist to npm — the sendLock serialization, `fetchMessageHistory` defensive guard, and `retryTracker` rc10 path were in source but not in the published package. v3.8.3 corrects this.
+- **`sendMessage` concurrent send serialization.** Wraps each send in a `sendLock` promise chain so `beforeSend`→`afterSend` accounting is serialized. Without this, all concurrent callers read the same committed rate-limiter state before any `afterSend` records, allowing burst sends to bypass per-minute limits.
+- **`messageRecovery`: defensive `fetchMessageHistory` guard.** Baileys v7 may change this signature. Now catches any error, logs a one-time warning, and skips recovery for that reconnect rather than crashing the handler.
+- **`retryTracker`: rc10 `update.update` path.** Baileys rc10 wraps error info in `update.update` rather than `update.error` in some cases. Classifier now checks all three forms.
+
+## [3.8.1] - 2026-04-28
+
+### Fixed
+- **`getStealthSocketConfig({ os })` now propagates `os` properly.** v3.8.0 silently dropped the value (placeholder no-op spread). The `os` opt rewrites the first slot of the resulting browser tuple as documented.
+- **Browser fingerprint randomized.** v3.8.0 hardcoded `['Ubuntu', 'Chrome', '20.0.04']` for every consumer — identical fingerprint across the install base is trivially cluster-able by WhatsApp. Now picks at random from `STEALTH_BROWSER_POOL`, a frozen array of realistic Mac/Windows/Linux Chrome/Safari/Firefox/Edge tuples with real-world version strings. Pool is exported so callers can extend or override.
+- **`rampPresenceAfterConnect()` accepts `AbortSignal`.** v3.8.0 had no way to cancel the pending timer; if the socket disconnected during the ramp window the post-delay `sendPresenceUpdate` would run against a dead socket. New `signal` option causes the returned promise to reject with `AbortError` when aborted, and clears the timer.
+- **Structural types instead of `any`.** `sock` parameter now typed as `PresenceCapableSocket` (matches `presenceChoreographer.ts`). `getStealthSocketConfig()` returns a typed `StealthSocketConfig`. Consumers get autocomplete on `markOnlineOnConnect` / `browser`.
+- JSDoc claims corrected — removed phantom `os` default value.
+
+### Added
+- `STEALTH_BROWSER_POOL` (named export) — frozen pool of realistic browser tuples used by `getStealthSocketConfig()`.
+- `AbortError` (named export) — thrown when `rampPresenceAfterConnect` is aborted via signal. Mirrors DOM `AbortError` semantics.
+- New typed exports: `BrowserTuple`, `StealthSocketConfig`, `GetStealthSocketConfigOptions`, `RampPresenceOptions`, `PresenceCapableSocket`.
+- `random` opt on both helpers — inject custom RNG (useful for deterministic tests).
+- `browser` opt on `getStealthSocketConfig()` — supply an explicit tuple. Takes precedence over `os` and the pool.
+
+### Migration
+- v3.8.0 → v3.8.1 is non-breaking. The shape of the returned config is unchanged at runtime; the default browser tuple is now random rather than fixed. If you depended on the exact `['Ubuntu', 'Chrome', '20.0.04']` value, pass it explicitly via `browser: ['Ubuntu', 'Chrome', '20.0.04']`.
+
+## [3.8.0] - 2026-04-28
+
+### Added
+- **Stealth Connect** — Gradual presence ramp to reduce ban signals. Inspired by GOWA's `--presence-on-connect=unavailable` flag. Bots that instantly snap online and start blasting messages look suspicious. New helpers:
+  - `getStealthSocketConfig({ os?: string })` — returns socket config with `markOnlineOnConnect: false` and sensible browser defaults.
+  - `rampPresenceAfterConnect(sock, { minDelayMs?, maxDelayMs?, targetState? })` — waits 30-90s (configurable), then transitions presence to `available` (or custom state). Call after socket connects. Returns a promise.
+- Use together: connect silently, ramp presence gradually when ready to act.
+
+## [3.7.0] - 2026-04-27
+
+### Added
+- `LidResolver.learnFromGroupMetadata(participants)` — ingest LID↔PN mappings from Baileys group metadata. Supports v6 (`id: '@s.whatsapp.net', lid: '@lid'`) and v7 (`id: '@lid', phoneNumber: '@s.whatsapp.net'`) participant formats.
+- `JidCanonicalizer.learnFromGroupMetadata(participants)` — passthrough to `LidResolver.learnFromGroupMetadata()`.
+
+### Fixed
+- Confirmed compatibility with Baileys v7.0.0-rc.9 LID migration. `resolveCanonical()` correctly falls back to original JID when LID→PN mapping is unknown (no throw).
+
+### Notes
+- Default `enabled: false` unchanged — opt-in as always.
+- Group metadata learning is the recommended way to pre-populate LID mappings for auction groups where `getCachedGroupMetadata()` is called anyway.
+
+## [3.6.1] - 2026-04-26
+
+### Changed
+- Re-released via GitHub Actions release workflow to restore SLSA provenance attestation chain. v3.6.0 was published from a local CLI without `--provenance`; v3.6.1 ships with full Sigstore-verifiable build provenance. No code changes.
+
+## [3.6.0] - 2026-04-26
+
+### Added
+- Circadian timing curve in presenceChoreographer — typing/composing delays now scale with hour of day. Late-night messages get 4-6x slower presence to match human sleep patterns. Configurable via `circadian.profile` (default | nightOwl | earlyBird | always_on) and `circadian.timezone` (IANA).
+- Exported `getCircadianMultiplier(date, profile)` for downstream use.
+- Smooth cosine-based transitions between time periods (no stepped changes).
+- Circadian multiplier applied to typing durations, think pauses, read receipt delays.
+- Four built-in profiles: `default` (9-22 awake), `nightOwl` (+3hr shift), `earlyBird` (-2hr shift), `always_on` (flat 1.0 for 24/7 bots).
+- Timezone-aware hour calculation using `Intl.DateTimeFormat` for correct local time.
+
+### Why v3.6
+Per GapHunter competitive analysis, competitor `whatsapp-ai-framework` ships circadian response timing (slower at night). WhatsApp ban heuristics likely flag accounts that respond instantly at 04:00 AM. Real humans respond fast 09:00-22:00, slow late-night, near-zero 02:00-06:00. This release closes that gap.
+
+## [3.5.0] — 2026-04-26
+
+### Added
+- **proxyRotator** — Native proxy injection with multi-strategy rotation and health tracking
+  - Closes the datacenter IP ban vector — WhatsApp's ML flags VPS IPs, residential/4G proxies stay alive
+  - Supports SOCKS5, SOCKS5H, HTTP, HTTPS proxies with auth
+  - 4 rotation strategies: round-robin, random, least-recently-used, weighted (by health)
+  - Auto-failover on endpoint failure with configurable dead thresholds (default: 3 failures)
+  - Health tracking: failure counters, dead-marking, auto-resurrection after cooldown (default: 10min)
+  - Per-endpoint cooldown periods to avoid hammering proxy providers
+  - Scheduled rotation for proactive IP rotation (configurable interval)
+  - Rotation triggers: manual, disconnect, ban-warning, scheduled (user-wired)
+  - Lazy-loaded proxy agent dependencies (optional peerDeps: socks-proxy-agent, http-proxy-agent, https-proxy-agent)
+  - Agent caching for performance (avoids re-creating agents on every request)
+  - Comprehensive stats: total rotations, per-trigger breakdowns, endpoint health dashboard
+  - Production-ready error handling: graceful fallback when peer deps missing
+
+### Fixed
+- **proxyRotator**: Fixed ESM `require()` regression by using `createRequire()` from `node:module` for ESM-compatible synchronous module loading (caught by live SOCKS5 smoke test before publish)
+
+### Why v3.5
+Per GapHunter analysis, WhatsApp's ban detection includes IP reputation scoring. Datacenter IPs (VPS) are flagged. Residential/4G proxies stay alive. Every Baileys implementation uses DIY proxy hacks — no library handles native proxy injection. `proxyRotator` closes that gap with production-grade rotation strategies, health tracking, and auto-failover.
+
+### Usage
+```ts
+import { proxyRotator } from 'baileys-antiban';
+import { makeWASocket } from 'baileys';
+
+const rotator = proxyRotator({
+  pool: [
+    { type: 'socks5', host: 'proxy1.example.com', port: 1080, username: 'user', password: 'pass', label: 'Proxy1' },
+    { type: 'socks5', host: 'proxy2.example.com', port: 1080, username: 'user', password: 'pass', label: 'Proxy2', cooldownMs: 300_000 },
+  ],
+  strategy: 'weighted', // Prefer healthier endpoints
+  rotateOn: ['disconnect', 'ban-warning'],
+  maxFailures: 3,
+  deadCooldownMs: 600_000, // 10 minutes
+});
+
+const sock = makeWASocket({
+  auth: state,
+  fetchAgent: rotator.currentAgent(), // Inject proxy into Baileys fetch
+});
+
+// Wire disconnect rotation
+sock.ev.on('connection.update', ({ connection }) => {
+  if (connection === 'close') {
+    rotator.rotate('disconnect');
+  }
+});
+
+// Wire ban-warning rotation (from sessionStability)
+monitor.onDegraded = () => {
+  rotator.rotate('ban-warning');
+};
+
+// Check stats
+console.log(rotator.getStats());
+```
+
+### Technical Details
+- Agent caching: agents are created once per endpoint and reused until rotation
+- Cooldown logic: endpoints are skipped if `Date.now() - lastUsedAt < cooldownMs`
+- Dead resurrection: auto-checks on rotation if `Date.now() - lastUsedAt >= deadCooldownMs`
+- Weighted strategy: `weight = 1 / (failures + 1)` for probabilistic health-biased selection
+- LRU strategy: prioritizes never-used endpoints, then oldest `lastUsedAt`
+- Peer dep handling: uses `require()` with try/catch, logs clear error on missing deps
+- Pool size 1: logs warning once, rotation becomes no-op
+- All endpoints dead: `currentAgent()` returns `null`, user code must handle
+
+## [3.4.0] — 2026-04-26
+
+### Added
+- **WPM-based typing duration model** — Realistic typing indicator patterns based on human typing speed
+  - `PresenceChoreographer.computeTypingPlan(messageLength)` — Generates realistic typing plan with Gaussian WPM variance
+  - `PresenceChoreographer.executeTypingPlan(sock, jid, plan)` — Executes multi-step typing/pause cycle
+  - Gaussian sampling (Box-Muller) for WPM variance (default: 45 WPM ± 15 stdDev, clamped 10-120)
+  - Think-pause injection: 8% probability per 10 chars, 0.8-3.5s pauses (humans pause mid-thought)
+  - Intermittent `paused` state (40% probability) before send for realism
+  - Configurable min/max typing duration caps (default: 0.6s - 90s)
+  - AbortSignal support for mid-plan cancellation
+  - New stats: `typingPlansComputed`, `typingPlansExecuted`, `totalTypingTimeMs`
+  - Zero new dependencies — pure TypeScript with Box-Muller transform
+
+### Why v3.4
+WhatsApp's ML models flag accounts that fire `composing` then immediately send, or never fire typing indicators at all. Real humans typing a 200-character message take 30-60 seconds with multiple typing/paused cycles. This is the missing signal layer that completes PresenceChoreographer's anti-detection coverage. The WPM model is the final piece of the presence choreography puzzle — realistic read receipts (v1.3), distraction pauses (v1.3), circadian rhythm (v1.3), and now typing duration.
+
+### Usage
+```ts
+import { PresenceChoreographer } from 'baileys-antiban';
+
+const choreo = new PresenceChoreographer({
+  enabled: true,
+  enableTypingModel: true,
+  typingWPM: 45,             // Average human typing speed
+  typingWPMStdDev: 15,       // Variance (slow/fast days)
+  thinkPauseProbability: 0.08,
+  thinkPauseMinMs: 800,
+  thinkPauseMaxMs: 3500,
+});
+
+// Before sending a message
+const messageText = "Hello, how are you doing today?";
+const plan = choreo.computeTypingPlan(messageText.length);
+
+// Execute typing plan
+await choreo.executeTypingPlan(sock, jid, plan);
+
+// Send actual message
+await sock.sendMessage(jid, { text: messageText });
+```
+
+### Technical Details
+- Plan structure: `Array<{ state: 'composing' | 'paused', durationMs: number }>`
+- WPM → chars/sec conversion: `(WPM × 5) / 60` (industry standard: 5 chars/word)
+- Think pauses are extras, not subtracted from base typing time (20% budget slack)
+- Composing chunks coalesced when no pause injected between them
+- AbortSignal cleanup: sets presence to `paused` before throwing
+- All existing PresenceChoreographer features remain unchanged and backward compatible
+
+## [3.3.0] — 2026-04-26
+
+### Added
+- **`JidCanonicalizer.canonicalKey(jid)`** — Returns stable thread key for DB storage/indexing
+  - Solves the split-thread bug from Baileys v7 LID migration ([#1832](https://github.com/WhiskeySockets/Baileys/issues/1832))
+  - Always returns same key regardless of whether message arrives as `@lid` or `@s.whatsapp.net`
+  - Format: `thread:<digits>` for known contacts, `thread:lid:<digits>` for unknown, `thread:group:<id>` for groups
+  - Uses learned LID↔PN mappings when available, falls back to LID form when not
+  - Handles edge cases: groups, broadcasts, newsletters, empty/null inputs
+  - Tracks stats: `canonicalKeyHits` (PN known) vs `canonicalKeyMisses` (LID only)
+- **`docs/lid-migration.md`** — Comprehensive guide for surviving Baileys v7's LID migration
+  - Explains the three major bugs LID causes (#1832 split-thread, #1718 phone lookup, #2030 call routing)
+  - Full integration examples: learning from events, canonicalizing sends, stable DB keys
+  - Production setup with persistence, stats logging, cleanup
+  - Limitations and best practices
+
+### Why v3.3
+Baileys v7 made `@lid` the default JID format, but many apps still use `remoteJid` as their database thread key. This causes the same conversation to appear as two separate threads when messages arrive under different forms. `canonicalKey()` provides a stable, form-independent identifier that prevents this split-thread bug. The LID migration doc owns the narrative for the v7 transition.
+
+## [3.2.0] — 2026-04-26
+
+### New Features
+- **deviceFingerprint** — Randomizes appVersion, osVersion, and deviceModel to prevent Meta's clientPayload fingerprinting (the #1 gap in anti-ban coverage per GapHunter analysis)
+  - Randomizes appVersion patch number within safe range (e.g. 2.24.5.18 → 2.24.5.[15-22])
+  - Randomizes osVersion (Android versions 10-14)
+  - Randomizes deviceModel from pool of 12 real-world devices (Pixel, Galaxy, Xiaomi, OnePlus, etc.)
+  - Deterministic PRNG seeded from sessionId for stable fingerprints per session
+  - `generateFingerprint()` creates unique fingerprint per session
+  - `applyFingerprint()` applies to Baileys SocketConfig before makeWASocket()
+  - User-configurable pools for custom device/OS combinations
+  - Master switch: `enabled: false` to disable all randomization
+- **credsSnapshot** — Atomic credentials backup to prevent code-500 corruption loop
+  - `take()` creates atomic snapshot of creds.json before risky operations
+  - `restoreLatest()` recovers from most recent snapshot
+  - Automatic rotation keeps only N newest snapshots (default: 3)
+  - Atomic file operations (write to .tmp, rename) prevent partial writes
+  - Graceful handling of missing creds file (no crashes)
+- **readReceiptVariance** — Randomizes read receipt timing to avoid instant-read bot signals
+  - Gaussian-jittered delay before sending read receipts (mean: 1500ms, stdDev: 800ms)
+  - Configurable min/max clamps (default: 200-8000ms)
+  - Skips variance for backlog messages (older than 60s by default)
+  - `wrap()` proxies sock.readMessages with transparent delay injection
+  - `delayMs()` for manual delay computation in custom receipt logic
+  - Box-Muller transform for realistic human timing variance
+  - `stop()` cancels all pending timers on disconnect
+
+### Why v3.2
+Per GapHunter analysis, device fingerprint randomization is the single highest-ROI ban-prevention upgrade. Baileys ships identical clientPayload for every instance — Meta literally fingerprints it. This release closes that gap plus two critical operational gaps (creds corruption, instant-read bot detection).
+
+### Usage
+```ts
+import { generateFingerprint, applyFingerprint, credsSnapshot, readReceiptVariance } from 'baileys-antiban';
+
+// 1. Device fingerprint randomization
+const fp = generateFingerprint({ seed: 'my-session-123' });
+const sock = makeWASocket(applyFingerprint(socketConfig, fp));
+
+// 2. Atomic creds snapshot
+const snapshot = credsSnapshot({ credsPath: './auth/creds.json', keep: 5 });
+await snapshot.take(); // Before risky reconnect
+// ... on code-500 corruption:
+await snapshot.restoreLatest();
+
+// 3. Read receipt variance
+const variance = readReceiptVariance({ meanMs: 2000, stdDevMs: 1000 });
+const wrappedSock = variance.wrap(sock);
+// Now all readMessages() calls have human-like delays
+```
+
+### Technical Details
+- Zero runtime dependencies (Box-Muller in pure JS, fs from Node stdlib)
+- TypeScript strict mode compliant
+- Deterministic PRNG (mulberry32) for reproducible testing
+- Atomic file operations prevent corruption on crash
+- All modules are standalone and can be used independently
+
+---
+
+## [3.1.0] — 2026-04-25
+
+### New Features
+- **messageRecovery** — Solves Baileys' silent message loss on 408 reconnect (47+ 👍 issue)
+  - Tracks last seen message per chat while connected
+  - Detects disconnect/reconnect cycles automatically
+  - On reconnect, queries Baileys message store for gap messages
+  - Re-emits missing messages through user callback (wire to existing messages.upsert handler)
+  - Fires `onGapTooLarge` callback if disconnect > 30min (configurable) instead of partial recovery
+  - Optional persistence across process restarts (`persistPath` config)
+  - LRU eviction when tracked chats exceed `maxTrackedChats` (default 1000)
+  - Gracefully handles Baileys versions without `fetchMessageHistory` (logs warning, skips recovery)
+
+### Usage
+```ts
+import { messageRecovery } from 'baileys-antiban';
+
+const recovery = messageRecovery(sock, {
+  onGapFilled: async (msg, chatJid) => {
+    // Wire to your existing messages.upsert handler
+    await handleMessage(msg, chatJid);
+  },
+  onGapTooLarge: async (gapMs) => {
+    console.warn(`Disconnect too long (${gapMs}ms) — manual reconciliation needed`);
+  },
+  persistPath: './recovery-state.json', // Optional
+  maxGapMs: 30 * 60_000, // 30 minutes (default)
+  maxTrackedChats: 1000, // LRU cap (default)
+});
+
+// Later: recovery.stop() to cleanup listeners + flush persistence
+```
+
+---
+
+## [3.0.0] — 2026-04-25
+
+### Breaking Changes
+- Constructor now accepts `string | FlatConfig | undefined` — nested v2 config still works but logs deprecation warning
+- `WarmUpConfig.statePath` removed (use `persist` in AntiBanConfig instead)
+
+### New Features
+- **Zero-config:** `new AntiBan()` works with conservative defaults
+- **Presets:** `conservative` / `moderate` / `aggressive`
+- **State persistence:** `persist: './state.json'` — warmup + knownChats survive restarts
+- **Group profiles:** `groupProfiles: true` — stricter rate limits for @g.us and @newsletter JIDs
+- **Health decay:** Score recovers automatically (2pts/min severe, 5pts/min normal)
+- **CLI:** `npx baileys-antiban status|reset|warmup`
+
+### Bug Fixes
+- `statePath` in WarmUpConfig was declared but never implemented — replaced with working `persist` option
+- Health score never recovered after ban signals — fixed with time-based decay
+
+---
+
+## [2.1.0] - 2026-04-19
+
+### Added
+- **Extended disconnect code coverage** — Added 405, 409, 412 to `classifyDisconnect()`
+  - **405** (Method Not Allowed) → `fatal`, no reconnect
+  - **409** (Conflict / Connection Replaced) → `fatal`, no reconnect (merged with 428 behavior)
+  - **412** (Precondition Failed) → `recoverable`, 30s backoff (auth state mismatch, retry after delay)
+- **LidFirstResolver** — Standalone drop-in utility for LID↔phone mapping
+  - Loads mappings from Baileys auth state directory (`lid-mapping-*_reverse.json`)
+  - `resolveToLID(phoneOrJid)` — phone → LID lookup
+  - `resolveToPhone(lid)` — LID → phone lookup
+  - `loadFromAuthDir(dir)` — bulk load from auth state
+  - `learnFromEvent(event)` — learn from Baileys events (future-proof)
+  - `getMapping(jid)` — full mapping with metadata
+  - Factory function `createLidFirstResolver()` for singleton pattern
+  - Works independently of full AntiBan system
+- **MessageRetryReason enum** — Typed retry reason codes for message encryption failures
+  - 8 retry reason codes: UnknownError, GenericError, SignalErrorInvalidKeyId, SignalErrorInvalidMessage, SignalErrorNoSession, SignalErrorBadMac, MessageExpired, DecryptionError
+  - `MAC_ERROR_CODES` set for quick MAC error detection
+  - `parseRetryReason(code)` — parse from string/number to enum
+  - `isMacError(reason)` — check if reason is a MAC error
+  - `getRetryReasonDescription(reason)` — human-readable descriptions
+  - Based on whatsapp-rust and Baileys protocol research
+  - Named `MessageRetryReason` to avoid conflict with existing `RetryReason` type from `retryTracker.ts`
+
+### Changed
+- `index.ts` now exports `LidFirstResolver`, `createLidFirstResolver`, `LidPhoneMapping`, `MessageRetryReason`, `MAC_ERROR_CODES`, `parseRetryReason`, `isMacError`, `getRetryReasonDescription`
+
+### Tests
+- 30 new tests for `LidFirstResolver` (auth dir loading, phone↔LID resolution, malformed input handling, factory function)
+- 21 new tests for `RetryReason` (enum values, MAC error detection, parsing, descriptions, integration scenarios)
+- 3 new tests for disconnect codes 405, 409, 412 in `sessionStability.test.ts`
+- Total new test coverage: 54 tests
+
+### Technical Details
+- `LidFirstResolver` uses in-memory maps for O(1) lookup performance
+- Handles device suffix normalization (`:N` in JIDs)
+- Gracefully handles malformed auth dirs and JSON files (no crashes)
+- `RetryReason` enum matches Signal protocol + WhatsApp extensions
+- Backward compatible — all new features are opt-in, no breaking changes
+
+## [2.0.0] - 2026-04-19
+
+### Added
+- **Session Stability Module** — New middleware layer for Baileys socket stability (opt-in, backward compatible)
+  - `wrapWithSessionStability()` — Proxy wrapper for Baileys socket with stability features
+  - `SessionHealthMonitor` — Track decrypt success/fail ratio, emit degradation alerts when Bad MAC rate exceeds threshold
+  - `classifyDisconnect()` — Typed disconnect reason classification with recovery recommendations
+  - Canonical JID normalization before `sendMessage()` — Auto-resolves PN↔LID using `LidResolver` to reduce mutex race triggers
+  - Comprehensive disconnect code coverage: 401, 408, 428, 429, 440, 500, 503, 515, 1000, unknown
+  - Degradation detection: triggers `onDegraded` callback when Bad MAC count exceeds threshold in time window (default: 3 in 60s)
+  - Recovery detection: triggers `onRecovered` callback when Bad MAC rate drops below threshold
+  - 19 new tests with 100% coverage of disconnect classification and health monitoring
+
+### Changed
+- `AntiBan` class extended with optional `sessionStability` config (default: disabled)
+- `AntiBanConfig` interface includes `sessionStability` options (enabled, canonicalJidNormalization, healthMonitoring, badMacThreshold, badMacWindowMs)
+- `AntiBanStats` includes `sessionStability` stats when enabled
+- `destroy()` now cleans up session stability monitor
+- Exposed `sessionStability` getter for direct access to health monitor
+
+### Technical Details
+- Pure middleware layer — no Baileys internals modification required
+- Works alongside existing v1.x LID resolver and canonicalizer modules
+- Default configuration: disabled for backward compatibility, opt-in via `sessionStability: { enabled: true }`
+- Health monitor uses sliding window for Bad MAC detection (default: 3 errors in 60 seconds)
+- Socket wrapper uses ES6 Proxy for transparent method interception
+- TypeScript strict mode compliant, no `any` types except socket wrapper generic
+
+### Breaking Changes
+None — all v2.0 features are opt-in and backward compatible with v1.x
+
+## [1.6.0] - 2026-04-18
+
+### Added
+- **LID/PN Race Condition Mitigation** — New modules to address the #1 reported Baileys bug: "Bad MAC / No Session / Invalid PreKey" errors caused by WhatsApp's Linked Identity (LID) migration
+  - `LidResolver` — Standalone utility for maintaining bidirectional LID↔PN mappings learned from message events
+  - `JidCanonicalizer` — Opt-in middleware that auto-learns from incoming events and canonicalizes outbound send targets to a single form (phone number by default)
+  - Both modules default to **disabled** — backward compatible, zero behavior change for existing users
+  - Middleware-layer mitigation only — root fix still requires [PR #2372](https://github.com/WhiskeySockets/Baileys/pull/2372) merged upstream
+  - Comprehensive test coverage: 56 new tests (29 LidResolver + 18 JidCanonicalizer + 9 integration)
+
+### Changed
+- `AntiBan` class now exposes `lidResolver` and `jidCanonicalizer` getters for direct access
+- `AntiBanConfig` extended with `lidResolver` and `jidCanonicalizer` config options
+- `AntiBanStats` includes `lidResolver` and `jidCanonicalizer` stats when enabled
+- Wrapper's `sendMessage` now canonicalizes JID before all rate-limit/timelock/graph checks
+- `messages.upsert` and `messages.update` handlers now auto-learn LID mappings when canonicalizer enabled
+
+### Technical Details
+- LRU eviction at configurable `maxEntries` (default 10,000)
+- Optional persistence hooks for cross-restart state survival
+- Device suffix stripping (`:N` in JIDs) for robust matching
+- Supports both `canonical: 'pn'` (phone number) and `canonical: 'lid'` modes
+- Shared resolver mode allows multiple canonicalizers to reference same mapping state
+
+## [1.5.0] - 2026-04-18
+
+### Added
+- **RetryReasonTracker** module: Track message retry reasons and detect retry spirals
+  - Classifies 10 retry reason types (no_session, invalid_key, bad_mac, decryption_failure, server_error_463, server_error_429, timeout, no_route, node_malformed, unknown)
+  - Detects retry spirals when same message retries exceed threshold (default: 3)
+  - Provides stats on total retries, retries by reason, spirals detected, and active retries
+  - Auto-integrates with messages.update events in wrapper
+  - Inspired by whatsapp-rust's protocol/retry.rs module
+- **PostReconnectThrottle** module: Throttle outbound messages after reconnection
+  - Prevents burst-floods on reconnect that trigger WhatsApp rate limits
+  - Configurable ramp-up from initial rate multiplier (default: 10%) to full rate over ramp duration (default: 60s)
+  - Linear ramp with configurable steps (default: 6 steps)
+  - Auto-integrates with connection.update events
+  - Inspired by whatsapp-rust's client/sessions.rs semaphore swap pattern
+- Both modules are opt-in (enabled: false by default) for backward compatibility
+
+### Changed
+- `AntiBan.beforeSend()` now also consults reconnect throttle
+- `AntiBan.onReconnect()` triggers reconnect throttle window
+- `AntiBan.getStats()` includes retry tracker and reconnect throttle stats when enabled
+- Wrapper now tracks message updates for retry classification and clears on successful send
+
+## [1.4.0] - 2026-04-18
+
+### Added
+- **Transport-agnostic support** — works with both `baileys` and `@oxidezap/baileyrs` (Rust/WASM WhatsApp library)
+- Both transports now listed as optional peer dependencies
+- GitHub Actions CI workflow with dual-transport matrix testing (Node 18.x + 20.x × baileys + baileyrs)
+- New test suite: `tests/transport-agnostic.test.ts` for duck-typed socket validation
+- Updated JSDoc examples showing usage with both transports
+
+### Changed
+- `peerDependencies` now includes both `baileys` and `@oxidezap/baileyrs` as optional
+- Package description updated to mention transport-agnostic support
+- Wrapper comments clarify baileyrs timelock behavior (no `reachoutTimeLock` events in v0.0.8 — operates in detection-only mode)
+
+### Why
+Positions baileys-antiban as "Switzerland" of WhatsApp anti-ban — works with any Baileys-compatible transport layer. No breaking changes for existing baileys users.
+
+## [1.3.1] - 2026-04-16
+
+### Changed
+- Refactor wrapper to use Baileys' `ev.process()` API — single batched event handler reduces listener leaks and cleans up the integration surface
+- Graceful fallback to `ev.on()` for older Baileys versions
+
+### Why
+Scattered `ev.on()` registrations are a known leak vector. Consolidating into `process()` shrinks the attack surface for listener-lifecycle bugs and future-proofs for backend-agnostic support.
+
+## [1.3.0] - 2026-04-16
+
+### Added
+- **ReplyRatioGuard** — tracks outbound:inbound ratio per contact, blocks sends to non-responsive contacts, suggests auto-replies to incoming messages
+- **ContactGraphWarmer** — requires 1:1 handshake before bulk/group send, enforces group lurk period, daily stranger quota
+- **PresenceChoreographer** — circadian rhythm enforcement, distraction pauses, realistic read-receipt timing
+- All three features are **opt-in** via config and backward compatible
+- New wrapSocket option: `autoRespondToIncoming` for hands-off reply-ratio maintenance
+- New config fields: `replyRatio`, `contactGraph`, `presence` in `AntiBanConfig`
+- New public methods: `onIncomingMessage()`, getters for new modules
+- Enhanced `AntiBanStats` with optional `replyRatio`, `contactGraph`, `presence` stats
+
+### Why
+Based on 2025-2026 ban detection research: WhatsApp's ML models weight reply-ratio, contact-graph distance, and temporal patterns more heavily than raw volume. These modules address the three largest gaps in existing anti-ban libraries.
+
+## [1.2.0] - 2026-04-13
+
+### Added
+- **`destroy()` method** in `AntiBan` class to clean up all timers and resources
+- **`destroy()` method** in `MessageQueue` class to clean up interval timer
+- **Explicit stat interfaces** exported from library:
+  - `WarmUpStatus` interface (replaces opaque `ReturnType<WarmUp['getStatus']>`)
+  - `RateLimiterStats` interface (replaces opaque `ReturnType<RateLimiter['getStats']>`)
+- Automatic cleanup on socket close in wrapper
+
+### Fixed
+- **Timer leak**: `AntiBan` now properly cleans up `TimelockGuard.resumeTimer` on connection close
+- **Type visibility**: Consumers can now see stat object shapes without inspecting implementation
+
+### Changed
+- `wrapSocket()` now automatically calls `antiban.destroy()` when `connection.close` event fires
+- `AntiBanStats` interface now uses explicit `WarmUpStatus` and `RateLimiterStats` types
+
+## [1.1.0] - 2026-03-27
+
+### Added
+- **StateAdapter interface** for persistent state management
+- `FileStateAdapter` class for JSON file-based state persistence
+- Comprehensive TypeScript type exports for all configuration interfaces
+- `SendDecision` type export from main index
+- `HealthMonitorConfig` type export
+- Full JSDoc documentation across all modules
+- Named constants for time values (MS_PER_MINUTE, MS_PER_HOUR, etc.)
+- `identicalMessageWindowMs` config option for time-windowed duplicate tracking
+- `resumeBufferMs` config for TimelockGuard safety margin
+- Comprehensive test suite for TimelockGuard
+
+### Changed
+- **README.md** completely rewritten with practical examples and better structure
+- Simplified package.json exports (ESM-only, removed CJS)
+- Added `sideEffects: false` to package.json for better tree-shaking
+- Updated tsconfig.json with strict mode enabled
+
+### Fixed
+- **Burst reset bug** in RateLimiter: `timeSinceLast` check now happens BEFORE `lastMessageTime` update
+- **Identical message tracking** now properly expires after time window (1 hour default) instead of persisting indefinitely
+- **Cleanup logic** in RateLimiter now removes expired identical message trackers based on `lastSeen` timestamp
+- **Hourly/daily limit delays** now properly sort messages by timestamp to find the oldest message
+- **Timer race condition** in TimelockGuard: generation counter prevents stale timer callbacks from firing
+
+### Improved
+- More accurate ban risk scoring in HealthMonitor
+- Better handling of 463 reachout timelock errors
+- Clearer error messages and logging
+- More robust state management across all components
+- Better TypeScript strict mode compliance
+
+## [1.0.0] - 2026-03-24
+
+### Added
+- Initial npm release
+- Core anti-ban features:
+  - Rate limiting with human-like timing patterns
+  - Warm-up system for new numbers (7-day gradual ramp)
+  - Health monitoring with auto-pause
+  - Socket wrapper for drop-in protection
+  - TimelockGuard for 463 reachout error handling
+- Advanced features:
+  - Message queue with auto-retry
+  - Content variator to avoid identical messages
+  - Smart scheduler for time-of-day optimization
+  - Webhook alerts (Telegram, Discord, custom)
+- Comprehensive test suite
+- Live test bot for real WhatsApp testing
+- Stress test bot for performance validation
+
+### Technical
+- TypeScript codebase with full type definitions
+- Peer dependency: Baileys >=6.0.0
+- Gaussian jitter for realistic delays
+- Typing simulation based on message length
+- Burst allowance for natural conversation flow
+- Persistent warm-up state support
+
+## [Pre-1.0.0] - Development
+
+### 2026-03-23
+- Added comprehensive smoke test suite
+- Implemented live test bot for real-world validation
+
+### 2026-03-22
+- Version 2.0 feature set: MessageQueue, ContentVariator, Scheduler, WebhookAlerts
+- Added .gitignore and cleaned up repository
+
+### 2026-03-20
+- Initial implementation: RateLimiter, WarmUp, HealthMonitor
+- Socket wrapper with automatic protection
+- Core anti-ban logic and safety mechanisms
+
+---
+
+## Upgrade Notes
+
+### 1.0.0
+This is the first stable release. API is considered stable and follows semantic versioning from this point forward.
+
+## Links
+- [GitHub Repository](https://github.com/kobie3717/baileys-antiban)
+- [npm Package](https://www.npmjs.com/package/baileys-antiban)
+- [Issues](https://github.com/kobie3717/baileys-antiban/issues)

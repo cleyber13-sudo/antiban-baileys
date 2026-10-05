@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+*.log
+# valores reais de infraestrutura (ver .local.env.example)
+.local.env
+# snapshot do código de produção — só local, não publicar
+referencia/
